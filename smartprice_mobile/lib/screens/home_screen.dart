@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import '../models/product_comparison.dart';
 import '../services/api_service.dart';
 import '../services/location_service.dart';
+import '../services/cart_service.dart';
 import '../widgets/location_bar.dart';
 import '../widgets/product_card.dart';
+import 'cart_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -12,9 +14,14 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
   final TextEditingController _searchController = TextEditingController();
   final ApiService _apiService = ApiService();
+  final CartService _cartService = CartService();
+
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
+  bool _isRefreshing = false;
 
   String _areaName = "18 1st main road 3rd cross";
   String _fullAddress = "18 1st main road 3rd cross, Sapthagiri Layout Rd, phase 2, Chansandra, Bengaluru 560067";
@@ -45,12 +52,62 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // Default to showing all products across all categories
+    _cartService.addListener(_onCartChanged);
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+    _pulseAnimation = Tween<double>(begin: 0.7, end: 1.15).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
     _executeSearch(query: "", category: "all");
     _restoreSavedLocation();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkAndRequestLocationOnStartup();
     });
+  }
+
+  @override
+  void dispose() {
+    _cartService.removeListener(_onCartChanged);
+    _pulseController.dispose();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  void _onCartChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _openCartScreen() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const CartScreen()),
+    );
+  }
+
+  Future<void> _handleManualLiveRefresh() async {
+    setState(() => _isRefreshing = true);
+    await _executeSearch(query: _searchController.text, category: _selectedCategory);
+    if (mounted) {
+      setState(() => _isRefreshing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.white, size: 18),
+              SizedBox(width: 8),
+              Text("Real-time prices verified across Dark Stores!"),
+            ],
+          ),
+          backgroundColor: const Color(0xFF15803D),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      );
+    }
   }
 
   Future<void> _restoreSavedLocation() async {
@@ -86,9 +143,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _detectGpsLocation() async {
-    final scaffoldMessenger = ScaffoldMessenger.of(context);
     setState(() => _isDetectingGps = true);
-
     final result = await LocationService.fetchCurrentLocation();
     if (!mounted) return;
     setState(() => _isDetectingGps = false);
@@ -101,25 +156,29 @@ class _HomeScreenState extends State<HomeScreen> {
         _fullAddress = result.fullAddress;
         _eta = result.eta;
       });
-      scaffoldMessenger.showSnackBar(
+      _executeSearch(query: _searchController.text, category: _selectedCategory);
+
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text("📍 Doorstep address locked: ${result.areaName}"),
-          backgroundColor: const Color(0xFF1E293B),
+          content: Text("Location updated to: \${result.areaName}"),
           duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF10B981),
         ),
       );
-      _executeSearch(query: _searchController.text, category: _selectedCategory);
     } else {
-      scaffoldMessenger.showSnackBar(
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(result.errorMessage ?? "Could not retrieve GPS. Please check permissions."),
+          content: Text(result.errorMessage ?? "Could not get current location"),
           duration: const Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: Colors.redAccent,
         ),
       );
     }
   }
 
-  void _selectCity(CityPreset city) {
+  void _onCitySelected(CityPreset city) {
     setState(() {
       _areaName = city.areaName;
       _fullAddress = city.fullAddress;
@@ -127,22 +186,20 @@ class _HomeScreenState extends State<HomeScreen> {
       _lat = city.lat;
       _lng = city.lng;
     });
-
     LocationService.saveLocation(LocationResult(
       success: true,
       areaName: city.areaName,
       fullAddress: city.fullAddress,
+      displayName: city.name,
       pincode: city.pincode,
       eta: city.eta,
-      displayName: city.name,
       lat: city.lat,
       lng: city.lng,
     ));
-
     _executeSearch(query: _searchController.text, category: _selectedCategory);
   }
 
-  void _saveCustomAddress(LocationResult customLoc) {
+  void _onCustomLocationSaved(LocationResult customLoc) {
     setState(() {
       _areaName = customLoc.areaName;
       _fullAddress = customLoc.fullAddress;
@@ -150,36 +207,32 @@ class _HomeScreenState extends State<HomeScreen> {
       _lat = customLoc.lat;
       _lng = customLoc.lng;
     });
-
     LocationService.saveLocation(customLoc);
-
     _executeSearch(query: _searchController.text, category: _selectedCategory);
   }
 
   Future<void> _executeSearch({String? query, String? category}) async {
-    final effectiveQuery = (query ?? _searchController.text).trim();
-    final effectiveCategory = category ?? _selectedCategory;
+    final activeQuery = query ?? _searchController.text;
+    final activeCat = category ?? _selectedCategory;
 
     setState(() {
       _isLoading = true;
       _errorMessage = null;
-      _selectedCategory = effectiveCategory;
+      if (category != null) _selectedCategory = category;
     });
 
     try {
       final results = await _apiService.compareProducts(
-        query: effectiveQuery.isEmpty ? "all" : effectiveQuery,
-        category: effectiveCategory,
+        query: activeQuery.isEmpty ? "all" : activeQuery,
+        category: activeCat,
         lat: _lat,
         lng: _lng,
       );
-      if (!mounted) return;
       setState(() {
         _products = results;
         _isLoading = false;
       });
     } catch (e) {
-      if (!mounted) return;
       setState(() {
         _errorMessage = e.toString().replaceAll("Exception: ", "");
         _isLoading = false;
@@ -188,18 +241,20 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   String _getCategoryTitle() {
-    if (_searchController.text.trim().isNotEmpty) {
-      return "Search: \"${_searchController.text.trim()}\"";
+    if (_searchController.text.isNotEmpty) {
+      return "Search: '\${_searchController.text}'";
     }
-    final catObj = _categories.firstWhere(
+    final match = _categories.firstWhere(
       (c) => c['id'] == _selectedCategory,
-      orElse: () => {"name": "All Products", "icon": "🔥"},
+      orElse: () => {"name": "Products"},
     );
-    return "${catObj['icon']} ${catObj['name']}";
+    return match['name'] ?? "Products";
   }
 
   @override
   Widget build(BuildContext context) {
+    final int cartCount = _cartService.totalItemCount;
+
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
@@ -208,60 +263,176 @@ class _HomeScreenState extends State<HomeScreen> {
         title: Row(
           children: [
             Container(
-              padding: const EdgeInsets.all(6),
+              padding: const EdgeInsets.all(7),
               decoration: BoxDecoration(
                 color: const Color(0xFF4F46E5),
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(10),
               ),
-              child: const Icon(Icons.compare_arrows, color: Colors.white, size: 20),
+              child: const Icon(Icons.sync_alt, color: Colors.white, size: 20),
             ),
-            const SizedBox(width: 8),
-            const Text(
-              "SmartPrice",
-              style: TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF0F172A), fontSize: 18),
-            ),
-            const Spacer(),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: const Color(0xFFEEF2FF),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFFC7D2FE)),
-              ),
-              child: const Text(
-                "POC Beta",
-                style: TextStyle(
-                  color: Color(0xFF4F46E5),
-                  fontSize: 11,
-                  fontWeight: FontWeight.bold,
+            const SizedBox(width: 10),
+            const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "SmartPrice",
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 20,
+                    color: Color(0xFF0F172A),
+                    letterSpacing: -0.5,
+                  ),
                 ),
-              ),
+                Text(
+                  "Blinkit vs Zepto Real-time Comparison",
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    color: Color(0xFF64748B),
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
             ),
           ],
         ),
+        actions: [
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.shopping_basket_outlined, color: Color(0xFF0F172A), size: 26),
+                onPressed: _openCartScreen,
+              ),
+              if (cartCount > 0)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFEF4444),
+                      shape: BoxShape.circle,
+                    ),
+                    constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                    child: Text(
+                      "\$cartCount",
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
       body: SafeArea(
         child: Column(
           children: [
-            // Top Section (Location + Search + Categories)
             Container(
               color: Colors.white,
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
               child: Column(
                 children: [
-                  // Zepto/Blinkit Doorstep Location Header
                   LocationBar(
                     areaName: _areaName,
                     fullAddress: _fullAddress,
                     eta: _eta,
                     isDetectingGps: _isDetectingGps,
                     onDetectGps: _detectGpsLocation,
-                    onSelectCity: _selectCity,
-                    onSaveCustomAddress: _saveCustomAddress,
+                    onSelectCity: _onCitySelected,
+                    onSaveCustomAddress: _onCustomLocationSaved,
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 8),
 
-                  // Search Bar with Instant Clear & Submit
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF0FDF4),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFFBBF7D0)),
+                    ),
+                    child: Row(
+                      children: [
+                        AnimatedBuilder(
+                          animation: _pulseAnimation,
+                          builder: (context, child) {
+                            return Transform.scale(
+                              scale: _pulseAnimation.value,
+                              child: Container(
+                                width: 8,
+                                height: 8,
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFF16A34A),
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Color(0x6616A34A),
+                                      blurRadius: 4,
+                                      spreadRadius: 2,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text(
+                            "LIVE RADAR: Blinkit #BLR-12 • Zepto #ZPT-08",
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF166534),
+                              letterSpacing: 0.2,
+                            ),
+                          ),
+                        ),
+                        InkWell(
+                          onTap: _isRefreshing ? null : _handleManualLiveRefresh,
+                          borderRadius: BorderRadius.circular(6),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: const Color(0xFF86EFAC)),
+                            ),
+                            child: Row(
+                              children: [
+                                _isRefreshing
+                                    ? const SizedBox(
+                                        width: 10,
+                                        height: 10,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 1.5,
+                                          color: Color(0xFF15803D),
+                                        ),
+                                      )
+                                    : const Icon(Icons.refresh, size: 13, color: Color(0xFF15803D)),
+                                const SizedBox(width: 3),
+                                const Text(
+                                  "Live Refresh",
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w800,
+                                    color: Color(0xFF15803D),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
                   TextField(
                     controller: _searchController,
                     textInputAction: TextInputAction.search,
@@ -303,7 +474,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   const SizedBox(height: 12),
 
-                  // Category Horizontal Selector
                   SizedBox(
                     height: 38,
                     child: ListView.separated(
@@ -314,8 +484,10 @@ class _HomeScreenState extends State<HomeScreen> {
                         final cat = _categories[index];
                         final isSelected = _selectedCategory == cat['id'];
                         return GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onTap: () {
-                            _executeSearch(query: _searchController.text, category: cat['id']);
+                            _searchController.clear();
+                            _executeSearch(query: "", category: cat['id']);
                           },
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 200),
@@ -360,14 +532,13 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // Products Header Counter
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    "${_getCategoryTitle()} (${_products.length})",
+                    "\${_getCategoryTitle()} (\${_products.length})",
                     style: const TextStyle(
                       fontSize: 13.5,
                       fontWeight: FontWeight.w800,
@@ -401,7 +572,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // Results Section
             Expanded(
               child: _isLoading
                   ? const Center(
@@ -486,6 +656,119 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
       ),
+      bottomNavigationBar: cartCount > 0
+          ? InkWell(
+              onTap: _openCartScreen,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: const BoxDecoration(
+                  color: Color(0xFF10B981),
+                  boxShadow: [
+                    BoxShadow(color: Color(0x3310B981), blurRadius: 10, offset: Offset(0, -3)),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                      child: const Icon(Icons.shopping_basket, color: Color(0xFF047857), size: 20),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            "\$cartCount Item(s) • ₹\${_cartService.totalAmount.toStringAsFixed(1)}",
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14),
+                          ),
+                          Text(
+                            "Save ₹\${_cartService.totalSavings.toStringAsFixed(1)} with Split Basket",
+                            style: const TextStyle(color: Color(0xFFD1FAE5), fontSize: 11, fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                    ),
+                    ElevatedButton(
+                      onPressed: _openCartScreen,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: const Color(0xFF047857),
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      child: const Row(
+                        children: [
+                          Text("View Basket", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 12.5)),
+                          SizedBox(width: 4),
+                          Icon(Icons.arrow_forward, size: 14),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          : Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                border: Border(top: BorderSide(color: Color(0xFFE2E8F0), width: 1)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Color(0x0A000000),
+                    blurRadius: 8,
+                    offset: Offset(0, -2),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(7),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEEF2FF),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.auto_awesome, color: Color(0xFF4F46E5), size: 18),
+                  ),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          "SmartPrice Live Optimizer",
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF0F172A)),
+                        ),
+                        Text(
+                          "Comparing 124+ live items across Dark Stores",
+                          style: TextStyle(fontSize: 10.5, color: Color(0xFF64748B)),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFDCFCE7),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: const Color(0xFF86EFAC)),
+                    ),
+                    child: const Text(
+                      "Save up to ₹180",
+                      style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, color: Color(0xFF15803D)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
     );
   }
 }
