@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from adapters.blinkit_adapter import BlinkitAdapter
 from adapters.zepto_adapter import ZeptoAdapter
 from matching_engine import ProductNormalizer
+from product_catalog import CATEGORIES, MASTER_PRODUCTS
 
 app = FastAPI(
     title="SmartPrice Aggregator API & Web Preview",
@@ -234,20 +235,26 @@ async def reverse_geocode(
         "lng": lng
     }
 
+@app.get("/api/v1/categories")
+def get_categories():
+    return {"status": "success", "categories": CATEGORIES}
+
 @app.get("/api/v1/compare")
 async def compare_products(
-    query: str = Query(..., min_length=2, description="Search item name (e.g. 'milk', 'egg', 'coke')"),
+    query: str = Query("all", description="Search item name or 'all' to show all products"),
+    category: str = Query("all", description="Filter by category (e.g. 'all', 'dairy', 'fruits_veg', 'bakery', 'snacks', 'drinks', 'staples', 'sweets', 'tea_coffee', 'cleaning', 'personal_care')"),
     lat: float = Query(12.9716, description="User latitude"),
     lng: float = Query(77.5946, description="User longitude")
 ):
     try:
-        blinkit_task = BlinkitAdapter.search(query, lat, lng)
-        zepto_task = ZeptoAdapter.search(query, lat, lng)
+        blinkit_task = BlinkitAdapter.search(query=query, lat=lat, lng=lng, category=category)
+        zepto_task = ZeptoAdapter.search(query=query, lat=lat, lng=lng, category=category)
         blinkit_items, zepto_items = await asyncio.gather(blinkit_task, zepto_task)
         matched_results = ProductNormalizer.match_and_merge(blinkit_items, zepto_items)
         return {
             "status": "success",
             "query": query,
+            "category": category,
             "location": {"lat": lat, "lng": lng},
             "totalResults": len(matched_results),
             "products": matched_results
@@ -788,17 +795,28 @@ def web_preview():
         <!-- Search Bar -->
         <div class="search-box">
             <span class="search-icon">🔍</span>
-            <input type="text" class="search-input" id="search-input" placeholder="Search milk, eggs, coke, butter..." value="milk" onkeypress="handleEnter(event)">
+            <input type="text" class="search-input" id="search-input" placeholder="Search any product (milk, chips, atta, oil, coke...)" value="" onkeypress="handleEnter(event)">
             <button class="search-btn" onclick="executeSearch()">Compare</button>
         </div>
 
-        <!-- Quick Tags -->
-        <div class="chips-row">
-            <div class="chip active" onclick="quickSearch('milk')">🥛 Milk</div>
-            <div class="chip" onclick="quickSearch('egg')">🥚 Eggs</div>
-            <div class="chip" onclick="quickSearch('coke')">🥤 Coca-Cola</div>
-            <div class="chip" onclick="quickSearch('butter')">🧈 Butter</div>
-            <div class="chip" onclick="quickSearch('bread')">🍞 Bread</div>
+        <!-- Categories Chips Row -->
+        <div class="chips-row" id="categories-row">
+            <div class="chip active" onclick="selectCategory('all', this)">🔥 All Products</div>
+            <div class="chip" onclick="selectCategory('dairy', this)">🥛 Dairy</div>
+            <div class="chip" onclick="selectCategory('fruits_veg', this)">🍎 Fruits & Veg</div>
+            <div class="chip" onclick="selectCategory('bakery', this)">🍞 Bakery & Eggs</div>
+            <div class="chip" onclick="selectCategory('snacks', this)">🍿 Snacks</div>
+            <div class="chip" onclick="selectCategory('drinks', this)">🥤 Drinks</div>
+            <div class="chip" onclick="selectCategory('staples', this)">🍚 Staples & Atta</div>
+            <div class="chip" onclick="selectCategory('sweets', this)">🍫 Chocolates</div>
+            <div class="chip" onclick="selectCategory('tea_coffee', this)">☕ Tea & Coffee</div>
+            <div class="chip" onclick="selectCategory('cleaning', this)">🧹 Cleaning</div>
+            <div class="chip" onclick="selectCategory('personal_care', this)">✨ Personal Care</div>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 2px 4px;">
+            <div id="results-count" style="font-size: 12.5px; font-weight: 700; color: #64748b;">Showing All Products</div>
+            <div style="font-size: 11px; color: #4f46e5; font-weight: 700;">Live Compare ⚡</div>
         </div>
 
         <!-- Loader -->
@@ -1103,6 +1121,15 @@ def web_preview():
         if (e.key === 'Enter') executeSearch();
     }
 
+    let currentCategory = "all";
+
+    function selectCategory(cat, element) {
+        currentCategory = cat;
+        document.querySelectorAll('#categories-row .chip').forEach(el => el.classList.remove('active'));
+        if (element) element.classList.add('active');
+        executeSearch();
+    }
+
     function quickSearch(tag) {
         document.getElementById('search-input').value = tag;
         executeSearch();
@@ -1110,23 +1137,26 @@ def web_preview():
 
     async function executeSearch() {
         const query = document.getElementById('search-input').value.trim();
-        if (!query) return;
+        const effectiveQuery = query || "all";
 
         const loader = document.getElementById('loader');
         const container = document.getElementById('results-container');
+        const countEl = document.getElementById('results-count');
         
         loader.style.display = 'block';
         container.innerHTML = '';
 
         try {
-            const resp = await fetch(`/api/v1/compare?query=${encodeURIComponent(query)}&lat=${currentLat}&lng=${currentLng}`);
+            const resp = await fetch(`/api/v1/compare?query=${encodeURIComponent(effectiveQuery)}&category=${encodeURIComponent(currentCategory)}&lat=${currentLat}&lng=${currentLng}`);
             const data = await resp.json();
             loader.style.display = 'none';
 
             if (data.products && data.products.length > 0) {
+                countEl.innerText = `Showing ${data.products.length} Products`;
                 renderProducts(data.products);
             } else {
-                container.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;">No products found for "${query}".</div>`;
+                countEl.innerText = `0 Products Found`;
+                container.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;">No products found for "${query}".<br><span style="font-size:12px; margin-top:6px; display:block;">Try searching 'milk', 'chips', 'bread', 'oil', or select '🔥 All Products'.</span></div>`;
             }
         } catch (err) {
             loader.style.display = 'none';

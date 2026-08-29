@@ -23,12 +23,15 @@ class ApiService {
 
   Future<List<ProductComparison>> compareProducts({
     required String query,
+    String category = 'all',
     required double lat,
     required double lng,
   }) async {
+    final effectiveQuery = query.trim().isEmpty ? 'all' : query.trim();
     final uri = Uri.parse('$baseUrl/api/v1/compare').replace(
       queryParameters: {
-        'query': query,
+        'query': effectiveQuery,
+        'category': category,
         'lat': lat.toString(),
         'lng': lng.toString(),
       },
@@ -51,6 +54,37 @@ class ApiService {
     } catch (e) {
       throw Exception('Failed to connect to comparison server: $e');
     }
+  }
+
+  Future<List<Map<String, String>>> fetchCategories() async {
+    try {
+      final uri = Uri.parse('$baseUrl/api/v1/categories');
+      final response = await http.get(uri).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final List<dynamic> list = data['categories'] ?? [];
+        return list.map((item) => {
+          'id': item['id'].toString(),
+          'name': item['name'].toString(),
+          'icon': item['icon'].toString(),
+        }).toList();
+      }
+    } catch (_) {}
+
+    // Fallback default categories
+    return [
+      {"id": "all", "name": "All Products", "icon": "🔥"},
+      {"id": "dairy", "name": "Dairy & Breakfast", "icon": "🥛"},
+      {"id": "fruits_veg", "name": "Fruits & Veg", "icon": "🍎"},
+      {"id": "bakery", "name": "Bakery & Eggs", "icon": "🍞"},
+      {"id": "snacks", "name": "Snacks", "icon": "🍿"},
+      {"id": "drinks", "name": "Cold Drinks", "icon": "🥤"},
+      {"id": "staples", "name": "Atta & Staples", "icon": "🍚"},
+      {"id": "sweets", "name": "Chocolates", "icon": "🍫"},
+      {"id": "tea_coffee", "name": "Tea & Coffee", "icon": "☕"},
+      {"id": "cleaning", "name": "Cleaning", "icon": "🧹"},
+      {"id": "personal_care", "name": "Personal Care", "icon": "✨"},
+    ];
   }
 
   Future<Map<String, dynamic>?> detectLiveLocation() async {
