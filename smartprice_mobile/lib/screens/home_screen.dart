@@ -16,7 +16,9 @@ class _HomeScreenState extends State<HomeScreen> {
   final TextEditingController _searchController = TextEditingController();
   final ApiService _apiService = ApiService();
 
-  String _currentLocationName = "Bangalore (Indiranagar)";
+  String _areaName = "Indiranagar 100ft Road";
+  String _fullAddress = "100ft Road, HAL 2nd Stage, Indiranagar, Bengaluru 560038";
+  String _eta = "8-11 MINS";
   double _lat = 12.9784;
   double _lng = 77.6408;
 
@@ -30,23 +32,40 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _searchController.text = "milk";
     _executeSearch("milk");
-    // Automatically prompt and fetch location on app launch/install
+    // Instant restore from local SharedPreferences cache + prompt/detect live GPS
+    _restoreSavedLocation();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkAndRequestLocationOnStartup();
     });
   }
 
+  Future<void> _restoreSavedLocation() async {
+    final saved = await LocationService.getSavedLocation();
+    if (saved != null && mounted) {
+      setState(() {
+        _areaName = saved.areaName;
+        _fullAddress = saved.fullAddress;
+        _eta = saved.eta;
+        _lat = saved.lat;
+        _lng = saved.lng;
+      });
+      _executeSearch(_searchController.text);
+    }
+  }
+
   Future<void> _checkAndRequestLocationOnStartup() async {
     setState(() => _isDetectingGps = true);
-    final position = await LocationService.getCurrentLocation();
+    final result = await LocationService.fetchCurrentLocation();
     if (!mounted) return;
     setState(() => _isDetectingGps = false);
 
-    if (position != null) {
+    if (result.success) {
       setState(() {
-        _lat = position.latitude;
-        _lng = position.longitude;
-        _currentLocationName = "Current GPS (${_lat.toStringAsFixed(3)}, ${_lng.toStringAsFixed(3)})";
+        _lat = result.lat;
+        _lng = result.lng;
+        _areaName = result.areaName;
+        _fullAddress = result.fullAddress;
+        _eta = result.eta;
       });
       if (_searchController.text.isNotEmpty) {
         _executeSearch(_searchController.text);
@@ -58,19 +77,21 @@ class _HomeScreenState extends State<HomeScreen> {
     final scaffoldMessenger = ScaffoldMessenger.of(context);
     setState(() => _isDetectingGps = true);
 
-    final position = await LocationService.getCurrentLocation();
+    final result = await LocationService.fetchCurrentLocation();
     if (!mounted) return;
     setState(() => _isDetectingGps = false);
 
-    if (position != null) {
+    if (result.success) {
       setState(() {
-        _lat = position.latitude;
-        _lng = position.longitude;
-        _currentLocationName = "Current GPS (${_lat.toStringAsFixed(3)}, ${_lng.toStringAsFixed(3)})";
+        _lat = result.lat;
+        _lng = result.lng;
+        _areaName = result.areaName;
+        _fullAddress = result.fullAddress;
+        _eta = result.eta;
       });
       scaffoldMessenger.showSnackBar(
         SnackBar(
-          content: Text("📍 Location updated to Current GPS (${_lat.toStringAsFixed(3)}, ${_lng.toStringAsFixed(3)})"),
+          content: Text("📍 Pinpoint locked: ${result.areaName}"),
           backgroundColor: const Color(0xFF1E293B),
           duration: const Duration(seconds: 2),
         ),
@@ -80,8 +101,9 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } else {
       scaffoldMessenger.showSnackBar(
-        const SnackBar(
-          content: Text("Could not retrieve GPS. Please check location permissions or select a city."),
+        SnackBar(
+          content: Text(result.errorMessage ?? "Could not retrieve GPS. Please check permissions."),
+          duration: const Duration(seconds: 3),
         ),
       );
     }
@@ -89,14 +111,27 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _selectCity(CityPreset city) {
     setState(() {
-      _currentLocationName = city.name;
+      _areaName = city.areaName;
+      _fullAddress = city.fullAddress;
+      _eta = city.eta;
       _lat = city.lat;
       _lng = city.lng;
     });
 
+    LocationService.saveLocation(LocationResult(
+      success: true,
+      areaName: city.areaName,
+      fullAddress: city.fullAddress,
+      pincode: city.pincode,
+      eta: city.eta,
+      displayName: city.name,
+      lat: city.lat,
+      lng: city.lng,
+    ));
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text("📍 Delivery area set to ${city.name}"),
+        content: Text("📍 Delivery area set to ${city.areaName}"),
         backgroundColor: const Color(0xFF1E293B),
         duration: const Duration(seconds: 2),
       ),
@@ -132,6 +167,30 @@ class _HomeScreenState extends State<HomeScreen> {
         _errorMessage = e.toString().replaceAll("Exception: ", "");
         _isLoading = false;
       });
+    }
+  }
+
+  void _saveCustomAddress(LocationResult customLoc) {
+    setState(() {
+      _areaName = customLoc.areaName;
+      _fullAddress = customLoc.fullAddress;
+      _eta = customLoc.eta;
+      _lat = customLoc.lat;
+      _lng = customLoc.lng;
+    });
+
+    LocationService.saveLocation(customLoc);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text("📍 Doorstep address set: ${customLoc.areaName}"),
+        backgroundColor: const Color(0xFF1E293B),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+
+    if (_searchController.text.isNotEmpty) {
+      _executeSearch(_searchController.text);
     }
   }
 
@@ -182,12 +241,15 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             children: [
               const SizedBox(height: 8),
-              // Location Bar with GPS Pin and Search Dropdown
+              // Zepto-Style Location Bar with ETA, Area, and Complete Full Address
               LocationBar(
-                currentLocationName: _currentLocationName,
+                areaName: _areaName,
+                fullAddress: _fullAddress,
+                eta: _eta,
                 isDetectingGps: _isDetectingGps,
                 onDetectGps: _detectGpsLocation,
                 onSelectCity: _selectCity,
+                onSaveCustomAddress: _saveCustomAddress,
               ),
               const SizedBox(height: 12),
 

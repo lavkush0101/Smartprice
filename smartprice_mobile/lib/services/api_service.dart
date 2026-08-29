@@ -52,4 +52,31 @@ class ApiService {
       throw Exception('Failed to connect to comparison server: $e');
     }
   }
+
+  Future<Map<String, dynamic>?> detectLiveLocation() async {
+    try {
+      final uri = Uri.parse('$baseUrl/api/v1/location/detect');
+      final response = await http.get(uri).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        return json.decode(response.body) as Map<String, dynamic>;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> reverseGeocode(double lat, double lng) async {
+    try {
+      final uri = Uri.parse('$baseUrl/api/v1/location/reverse').replace(
+        queryParameters: {
+          'lat': lat.toString(),
+          'lng': lng.toString(),
+        },
+      );
+      final response = await http.get(uri).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        return json.decode(response.body) as Map<String, dynamic>;
+      }
+    } catch (_) {}
+    return null;
+  }
 }
